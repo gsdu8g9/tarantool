@@ -511,7 +511,7 @@ xctl_record_encode(const struct xctl_record *record,
 	req.tuple = tuple;
 	req.tuple_end = pos;
 	memset(row, 0, sizeof(*row));
-	row->bodycnt = request_encode(&req, row->body);
+	row->bodycnt = request_encode(&req, row->body, &fiber()->gc);
 	return 0;
 }
 
