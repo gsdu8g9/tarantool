@@ -41,6 +41,7 @@
 #include <lualib.h>
 
 #include "box/applier.h"
+#include "box/relay.h"
 #include "box/recovery.h"
 #include "box/wal.h"
 #include "box/replication.h"
@@ -66,16 +67,28 @@ lbox_pushvclock(struct lua_State *L, struct vclock *vclock)
 }
 
 static void
-lbox_pushreplica(lua_State *L, struct replica *replica)
+lbox_pushvclock_max(struct lua_State *L, struct vclock *vclock1,
+		    struct vclock *vclock2)
 {
-	struct applier *applier = replica->applier;
+	if (vclock2 == NULL)
+		return lbox_pushvclock(L, vclock1);
+	lua_createtable(L, 0, vclock_size(vclock1));
+	struct vclock_iterator it;
+	vclock_iterator_init(&it, vclock1);
+	vclock_foreach(&it, replica) {
+		lua_pushinteger(L, replica.id);
+		int64_t lsn2 = vclock_get(vclock2, replica.id);
+		luaL_pushuint64(L, replica.lsn > lsn2? replica.lsn: lsn2);
+		lua_settable(L, -3);
+	}
+	luaL_setmaphint(L, -1); /* compact flow */
 
-	lua_createtable(L, 0, 4);
+}
 
-	lua_pushstring(L, "uuid");
-	lua_pushstring(L, tt_uuid_str(&replica->uuid));
-	lua_settable(L, -3);
-
+static void
+lbox_pushapplier(lua_State *L, struct applier *applier)
+{
+	lua_newtable(L);
 	/* Get applier state in lower case */
 	static char status[16];
 	char *d = status;
@@ -85,10 +98,6 @@ lbox_pushreplica(lua_State *L, struct replica *replica)
 
 	lua_pushstring(L, "status");
 	lua_pushstring(L, status);
-	lua_settable(L, -3);
-
-	lua_pushstring(L, "vclock");
-	lbox_pushvclock(L, &applier->vclock);
 	lua_settable(L, -3);
 
 	if (applier->reader) {
@@ -109,6 +118,53 @@ lbox_pushreplica(lua_State *L, struct replica *replica)
 	}
 }
 
+static void
+lbox_pushreplica(lua_State *L, struct replica *replica)
+{
+	struct applier *applier = replica->applier;
+	struct relay *relay = replica->relay;
+
+	lua_newtable(L);
+
+	lua_pushstring(L, "uuid");
+	lua_pushstring(L, tt_uuid_str(&replica->uuid));
+	lua_settable(L, -3);
+
+	struct vclock *vclock1 = NULL, *vclock2 = NULL;
+
+	lua_pushstring(L, "status");
+	if (applier != NULL && relay != NULL) {
+		lua_pushstring(L, "bidirectional");
+		if (vclock_size(&applier->vclock) >=
+		    vclock_size(&relay->vclock)) {
+			vclock1 = &applier->vclock;
+			vclock2 = &relay->vclock;
+		} else {
+			vclock1 = &relay->vclock;
+			vclock2 = &applier->vclock;
+		}
+	}
+	else if (applier != NULL) {
+		lua_pushstring(L, "follow");
+		vclock1 = &applier->vclock;
+	}
+	else {
+		lua_pushstring(L, "relay");
+		vclock1 = &relay->vclock;
+	}
+	lua_settable(L, -3);
+
+	lua_pushstring(L, "vclock");
+	lbox_pushvclock_max(L, vclock1, vclock2);
+	lua_settable(L, -3);
+
+	if (applier != NULL) {
+		lua_pushstring(L, "applier");
+		lbox_pushapplier(L, applier);
+		lua_settable(L, -3);
+	}
+}
+
 static int
 lbox_info_replication(struct lua_State *L)
 {
@@ -122,7 +178,8 @@ lbox_info_replication(struct lua_State *L)
 
 	replicaset_foreach(replica) {
 		/* Applier hasn't received replica id yet */
-		if (replica->id == REPLICA_ID_NIL || replica->applier == NULL)
+		if (replica->id == REPLICA_ID_NIL ||
+		    (replica->applier == NULL && replica->relay == NULL))
 			continue;
 
 		lbox_pushreplica(L, replica);
