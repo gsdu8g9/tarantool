@@ -46,29 +46,28 @@ VinylSpace::VinylSpace(Engine *e)
 void
 VinylSpace::applyInitialJoinRow(struct space *space, struct request *request)
 {
-	assert(request->type == IPROTO_INSERT);
-	assert(request->header != NULL);
-	struct vy_env *env = ((VinylEngine *)space->handler->engine)->env;
-
-	/* Check the tuple fields. */
-	if (tuple_validate_raw(space->format, request->tuple))
-		diag_raise();
-
-	struct vy_tx *tx = vy_begin(env);
-	if (tx == NULL)
-		diag_raise();
-
-	int64_t signature = request->header->lsn;
-
-	if (vy_replace(tx, NULL, space, request))
-		diag_raise();
-
-	if (vy_prepare(env, tx)) {
-		vy_rollback(env, tx);
-		diag_raise();
+	struct txn *txn = txn_begin_stmt(space);
+	try {
+		switch (request->type) {
+		case IPROTO_REPLACE:
+			executeReplace(txn, space, request);
+			break;
+		case IPROTO_UPSERT:
+			executeUpsert(txn, space, request);
+			break;
+		case IPROTO_DELETE:
+			executeDelete(txn, space, request);
+			break;
+		default:
+			tnt_raise(ClientError, ER_UNKNOWN_REQUEST_TYPE,
+				  (uint32_t) request->type);
+		}
+		txn_commit_stmt(txn, request);
+	} catch (Exception *e) {
+		say_error("rollback: %s", e->errmsg);
+		txn_rollback_stmt();
+		throw;
 	}
-	if (vy_commit(env, tx, signature))
-		panic("failed to commit vinyl transaction");
 }
 
 /*
