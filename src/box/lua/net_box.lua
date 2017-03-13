@@ -742,14 +742,13 @@ function remote_methods:rollback()
     return self:remote_tx_manage('rollback')
 end
 
-function remote_methods:remote_tx_2pc_manage(method, coordinator_id)
+function remote_methods:remote_tx_2pc_manage(method, tx_id, coordinator_id)
     if coordinator_id == nil then
         box.error(box.error.PROC_LUA, "Usage: "..method.."(coordinator_id)")
     end
     remote_check(self, method)
     local deadline = self._deadlines[fiber_self()]
     local timeout = deadline and max(0, deadline-fiber_time())
-    local tx_id = fiber_self().id()
     local err, res = self._transport.perform_request(timeout, method,
                                                      self._schema_id, tx_id,
                                                      coordinator_id)
@@ -761,11 +760,20 @@ function remote_methods:remote_tx_2pc_manage(method, coordinator_id)
 end
 
 function remote_methods:prepare(coordinator_id)
-    return self:remote_tx_2pc_manage('prepare', coordinator_id)
+    local tx_id = fiber_self().id()
+    self:remote_tx_2pc_manage('prepare', tx_id, coordinator_id)
+    if box.info().server.id == coordinator_id then
+        local f = fiber.create(function()
+            box.space._transaction:update({tx_id}, {{'+', 4, 1}})
+        end)
+        while f:status() ~= 'dead' do fiber.yield() end
+    end
+    return true
 end
 
 function remote_methods:begin_two_phase(coordinator_id)
-    return self:remote_tx_2pc_manage('begin_two_phase', coordinator_id)
+    local tx_id = fiber_self().id()
+    return self:remote_tx_2pc_manage('begin_two_phase', tx_id, coordinator_id)
 end
 
 function remote_methods:wait_state(state, timeout)
