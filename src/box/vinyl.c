@@ -6997,8 +6997,28 @@ int
 vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
 {
 	assert(tx->state == VINYL_TX_COMMIT);
-	if (lsn > e->xm->lsn)
+
+	if (unlikely(e->status == VINYL_INITIAL_RECOVERY_REMOTE ||
+		     e->status == VINYL_FINAL_RECOVERY_REMOTE)) {
+		/*
+		 * Vinyl expects LSNs of inserted statements to be
+		 * monotonically growing. When bootstrapping from a
+		 * remote master, statements are not necessarily
+		 * received in the order they were inserted on the
+		 * master, so we assign fake LSNs on replica, starting
+		 * from 0. This is OK, because the total number of
+		 * statements received during remote recovery can't be
+		 * greater than the max LSN on the master and hence
+		 * any statement inserted after recovery is complete
+		 * is guaranteed to have a greater LSN.
+		 */
+		lsn = e->xm->lsn + 1;
+	}
+
+	if (lsn != -1) {
+		assert(lsn > e->xm->lsn);
 		e->xm->lsn = lsn;
+	}
 
 	struct txv *v, *tmp;
 	struct vy_quota *quota = &e->quota;
@@ -7021,6 +7041,7 @@ vy_commit(struct vy_env *e, struct vy_tx *tx, int64_t lsn)
 			continue;
 		struct vy_index *index = v->index;
 		struct tuple *stmt = v->stmt;
+		assert(lsn != -1);
 		vy_stmt_set_lsn(stmt, lsn);
 		enum iproto_type type = vy_stmt_type(stmt);
 		if (index->key_def->iid == 0) {
