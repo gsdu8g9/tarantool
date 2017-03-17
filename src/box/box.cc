@@ -1413,6 +1413,7 @@ bootstrap_master(void)
 static void
 bootstrap_from_master(struct replica *master, struct vclock *start_vclock)
 {
+	(void)start_vclock;
 	struct applier *applier = master->applier;
 	assert(applier != NULL);
 	assert(applier->state == APPLIER_CONNECTED);
@@ -1440,9 +1441,6 @@ bootstrap_from_master(struct replica *master, struct vclock *start_vclock)
 	engine_begin_final_recovery();
 
 	applier_resume_to_state(applier, APPLIER_JOINED, TIMEOUT_INFINITY);
-
-	/* Start replica vclock using master's vclock */
-	vclock_copy(start_vclock, &applier->vclock);
 
 	/* Finalize the new replica */
 	engine_end_recovery();

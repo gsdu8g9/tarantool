@@ -199,6 +199,17 @@ applier_join(struct applier *applier)
 	struct ev_io *coio = &applier->io;
 	struct iobuf *iobuf = applier->iobuf;
 	struct xrow_header row;
+
+	/*
+	 * initial_vclock is the vclock for master's checkpoint,
+	 * final_vclock is the vclock at the end of final join stream.
+	 * final_join should be equal with initial_vclock for Tarantool < 1.7.0
+	 * versions and may be greather from Tarantool >= 1.7.0 versions if
+	 * final join stream is not empty. But final_vclock should be equal 
+	 * with instance vclock after final join stage.
+	 */
+	struct vclock initial_vclock, final_vclock;
+
 	xrow_encode_join(&row, &INSTANCE_UUID);
 	coio_write_xrow(coio, &row);
 
@@ -219,8 +230,8 @@ applier_join(struct applier *applier)
 		 * Start vclock. The vclock of the checkpoint
 		 * the master is sending to the replica.
 		 */
-		vclock_create(&applier->vclock);
-		xrow_decode_vclock(&row, &applier->vclock);
+		vclock_create(&initial_vclock);
+		xrow_decode_vclock(&row, &initial_vclock);
 	}
 
 	applier_set_state(applier, APPLIER_INITIAL_JOIN);
@@ -240,8 +251,8 @@ applier_join(struct applier *applier)
 			 * the replica's initial vclock in
 			 * bootstrap_from_master()
 			 */
-			vclock_create(&applier->vclock);
-			xrow_decode_vclock(&row, &applier->vclock);
+			vclock_create(&final_vclock);
+			xrow_decode_vclock(&row, &final_vclock);
 			break; /* end of stream */
 		} else if (iproto_type_is_error(row.type)) {
 			xrow_decode_error(&row);  /* rethrow error */
@@ -257,8 +268,21 @@ applier_join(struct applier *applier)
 	/*
 	 * Tarantool < 1.7.0: there is no "final join" stage.
 	 */
-	if (applier->version_id < version_id(1, 7, 0))
+	if (applier->version_id < version_id(1, 7, 0)) {
+		/*
+		 * Tarantool < 1.7.0 does not send snapshot vclock before
+		 * initial join stream but sends it after checkpoint rows.
+		 * So it is correct to setup instance vclock from final_vclock.
+		 */
+		vclock_copy(&recovery->vclock, &final_vclock);
 		goto finish;
+	}
+
+	/*
+	 * Initial join is done and we can set instance vclock to
+	 * master checkpoint vclock.
+	 */
+	vclock_copy(&recovery->vclock, &initial_vclock);
 
 	/*
 	 * Receive final data.
@@ -285,6 +309,17 @@ applier_join(struct applier *applier)
 finish:
 	say_info("final data received");
 
+	/* Compare instance vclock and master vclock */
+	if (vclock_compare(&recovery->vclock, &final_vclock) != 0) {
+		/*
+		 * Instance vclock differs, there is more or less rows
+		 * than should be
+		 */
+		tnt_raise(ClientError, ER_PROTOCOL, "Can't synchronize "
+			  "instance with master vclock");
+
+	}
+
 	applier_set_state(applier, APPLIER_JOINED);
 	applier_set_state(applier, APPLIER_CONNECTED);
 }
@@ -297,6 +332,7 @@ applier_subscribe(struct applier *applier)
 {
 	assert(applier->subscribe_stream != NULL);
 
+
 	/* Send SUBSCRIBE request */
 	struct ev_io *coio = &applier->io;
 	struct iobuf *iobuf = applier->iobuf;
@@ -304,6 +340,9 @@ applier_subscribe(struct applier *applier)
 
 	/* TODO: don't use struct recovery here */
 	struct recovery *r = ::recovery;
+	/* Init master vclock view to current instance vclock */
+	vclock_copy(&applier->master_vclock, &r->vclock);
+
 	xrow_encode_subscribe(&row, &REPLICASET_UUID, &INSTANCE_UUID, &r->vclock);
 	coio_write_xrow(coio, &row);
 	applier_set_state(applier, APPLIER_FOLLOW);
@@ -348,6 +387,8 @@ applier_subscribe(struct applier *applier)
 
 		if (iproto_type_is_error(row.type))
 			xrow_decode_error(&row);  /* error */
+		/* Follow master vclock */
+		vclock_follow(&applier->master_vclock, row.replica_id, row.lsn);
 		xstream_write(applier->subscribe_stream, &row);
 
 		iobuf_reset(iobuf);
@@ -478,9 +519,9 @@ applier_new(const char *uri, struct xstream *initial_join_stream,
 			 "struct applier");
 		return NULL;
 	}
+	vclock_create(&applier->master_vclock);
 	coio_init(&applier->io, -1);
 	applier->iobuf = iobuf_new();
-	vclock_create(&applier->vclock);
 
 	/* uri_parse() sets pointers to applier->source buffer */
 	snprintf(applier->source, sizeof(applier->source), "%s", uri);

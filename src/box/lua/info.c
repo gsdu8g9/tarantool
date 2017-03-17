@@ -88,7 +88,7 @@ lbox_pushreplica(lua_State *L, struct replica *replica)
 	lua_settable(L, -3);
 
 	lua_pushstring(L, "vclock");
-	lbox_pushvclock(L, &applier->vclock);
+	lbox_pushvclock(L, &applier->master_vclock);
 	lua_settable(L, -3);
 
 	if (applier->reader) {
