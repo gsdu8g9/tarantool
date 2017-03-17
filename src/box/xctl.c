@@ -383,8 +383,6 @@ xctl_record_encode(const struct xctl_record *record,
 	 * Calculate record size.
 	 */
 	size_t size = 0;
-	size += mp_sizeof_array(2);
-	size += mp_sizeof_uint(record->type);
 	size_t n_keys = 0;
 	if (key_mask & (1 << XCTL_KEY_VY_INDEX_ID)) {
 		assert(record->vy_index_id >= 0);
@@ -452,8 +450,6 @@ xctl_record_encode(const struct xctl_record *record,
 		return -1;
 	}
 	char *pos = tuple;
-	pos = mp_encode_array(pos, 2);
-	pos = mp_encode_uint(pos, record->type);
 	pos = mp_encode_map(pos, n_keys);
 	if (key_mask & (1 << XCTL_KEY_VY_INDEX_ID)) {
 		pos = mp_encode_uint(pos, XCTL_KEY_VY_INDEX_ID);
@@ -506,12 +502,11 @@ xctl_record_encode(const struct xctl_record *record,
 	/*
 	 * Store record in xrow.
 	 */
-	struct request req;
-	request_create(&req, IPROTO_INSERT);
-	req.tuple = tuple;
-	req.tuple_end = pos;
 	memset(row, 0, sizeof(*row));
-	row->bodycnt = request_encode(&req, row->body);
+	row->type = record->type + VY_XCTL_CREATE_INDEX;
+	row->body->iov_base = tuple;
+	row->body->iov_len = size;
+	row->bodycnt = 1;
 	return 0;
 }
 
@@ -527,18 +522,10 @@ xctl_record_decode(struct xctl_record *record,
 
 	memset(record, 0, sizeof(*record));
 
-	struct request req;
-	request_create(&req, row->type);
-	if (request_decode(&req, row->body->iov_base,
-			   row->body->iov_len) < 0)
-		return -1;
 
-	const char *pos = req.tuple;
+	const char *pos = row->body->iov_base;
 
-	if (mp_decode_array(&pos) != 2)
-		goto fail;
-
-	record->type = mp_decode_uint(&pos);
+	record->type = row->type - VY_XCTL_CREATE_INDEX;
 	if (record->type >= xctl_record_type_MAX)
 		goto fail;
 
@@ -584,7 +571,7 @@ xctl_record_decode(struct xctl_record *record,
 	return 0;
 fail:
 	buf = tt_static_buf();
-	mp_snprint(buf, TT_STATIC_BUF_LEN, req.tuple);
+	mp_snprint(buf, TT_STATIC_BUF_LEN, row->body->iov_base);
 	say_error("invalid record in metadata log: %s", buf);
 	diag_set(ClientError, ER_VINYL, "invalid xctl record");
 	return -1;

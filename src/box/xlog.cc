@@ -151,15 +151,26 @@ static const char v12[] = "0.12";
 static int
 xlog_meta_format(const struct xlog_meta *meta, char *buf, int size)
 {
-	char *vstr = vclock_to_string(&meta->vclock);
-	if (vstr == NULL)
-		return -1;
 	char *instance_uuid = tt_uuid_str(&meta->instance_uuid);
-	int total = snprintf(buf, size, "%s\n%s\n" INSTANCE_UUID_KEY ": "
-		"%s\n" VCLOCK_KEY ": %s\n\n",
-		 meta->filetype, v13, instance_uuid, vstr);
+	int total = snprintf(buf, size, "%s\n%s\n" INSTANCE_UUID_KEY ": %s\n",
+			     meta->filetype, v13, instance_uuid);
 	assert(total > 0);
-	free(vstr);
+	buf += total;
+	size -= total;
+	if (true || vclock_size(&meta->vclock) > 0) {
+		char *vstr = vclock_to_string(&meta->vclock);
+		if (vstr == NULL)
+			return -1;
+		int vstr_len = snprintf(buf, size, VCLOCK_KEY ": %s\n", vstr);
+		assert(vstr_len > 0);
+		buf += vstr_len;
+		size -= vstr_len;
+		total += vstr_len;
+		free(vstr);
+	}
+	assert(size > 1);
+	total += snprintf(buf, size, "\n");
+
 	return total;
 }
 
